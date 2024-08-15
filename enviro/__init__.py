@@ -97,7 +97,10 @@ import machine, sys, os, ujson
 from machine import RTC, ADC
 import phew
 from pcf85063a import PCF85063A
+import enviro.config_defaults as config_defaults
 import enviro.helpers as helpers
+
+config_defaults.add_missing_config_settings()
 
 # read the state of vbus to know if we were woken up by USB
 vbus_present = Pin("WL_GPIO2", Pin.IN).value()
@@ -150,53 +153,109 @@ print("")
 print("    -  --  ---- -----=--==--===  hey enviro, let's go!  ===--==--=----- ----  --  -     ")
 print("")
 
+def reconnect_wifi(ssid, password, country, hostname=None):
+  import time
+  import network
+  import math
+  import rp2
+  import ubinascii
+  
+  start_ms = time.ticks_ms()
 
-import network # TODO this was removed from 0.0.8
-def connect_to_wifi():
-  """ TODO what it was changed to
-  if phew.is_connected_to_wifi():
-    logging.info(f"> already connected to wifi")
-    return True
-  """
+  # Set country
+  rp2.country(country)
 
-  wifi_ssid = config.wifi_ssid
-  wifi_password = config.wifi_password
+  # Set hostname
+  if hostname is None:
+      hostname = f"EnviroW-{helpers.uid()[-4:]}"
+  network.hostname(hostname)
 
-  logging.info(f"> connecting to wifi network '{wifi_ssid}'")
-  """ TODO what it was changed to
-  ip = phew.connect_to_wifi(wifi_ssid, wifi_password, timeout_seconds=30)
+  # Reference: https://datasheets.raspberrypi.com/picow/connecting-to-the-internet-with-pico-w.pdf
+  CYW43_LINK_DOWN = 0
+  CYW43_LINK_JOIN = 1
+  CYW43_LINK_NOIP = 2
+  CYW43_LINK_UP = 3
+  CYW43_LINK_FAIL = -1
+  CYW43_LINK_NONET = -2
+  CYW43_LINK_BADAUTH = -3
 
-  if not ip:
-    logging.error(f"! failed to connect to wireless network {wifi_ssid}")
-    return False
+  status_names = {
+    CYW43_LINK_DOWN: "Link is down",
+    CYW43_LINK_JOIN: "Connected to wifi",
+    CYW43_LINK_NOIP: "Connected to wifi, but no IP address",
+    CYW43_LINK_UP: "Connect to wifi with an IP address",
+    CYW43_LINK_FAIL: "Connection failed",
+    CYW43_LINK_NONET: "No matching SSID found (could be out of range, or down)",
+    CYW43_LINK_BADAUTH: "Authenticatation failure",
+  }
 
-  logging.info("  - ip address: ", ip)
-  """
   wlan = network.WLAN(network.STA_IF)
-  wlan.active(True)
-  wlan.connect(wifi_ssid, wifi_password)
 
-  start = time.ticks_ms()
-  while time.ticks_diff(time.ticks_ms(), start) < 30000:
-    if wlan.status() < 0 or wlan.status() >= 3:
-      break
-    time.sleep(0.5)
+  def dump_status():
+    status = wlan.status()
+    logging.info(f"> active: {1 if wlan.active() else 0}, status: {status} ({status_names[status]})")
+    return status
 
-  seconds_to_connect = int(time.ticks_diff(time.ticks_ms(), start) / 1000)
-
-  if wlan.status() != 3:
-    logging.error(f"! failed to connect to wireless network {wifi_ssid}")
+  # Return True on expected status, exception on error status (negative) and False on timeout
+  def wait_status(expected_status, *, timeout=10, tick_sleep=0.5):
+    for i in range(math.ceil(timeout / tick_sleep)):
+      time.sleep(tick_sleep)
+      status = dump_status()
+      if status == expected_status:
+        return True
+      if status < 0:
+        raise Exception(status_names[status])
     return False
 
-  # a slow connection time will drain the battery faster and may
-  # indicate a poor quality connection
-  if seconds_to_connect > 5:
-    logging.warn("  - took", seconds_to_connect, "seconds to connect to wifi")
+  wlan.active(True)
+  # Disable power saving mode if on USB power
+  if vbus_present:
+    wlan.config(pm=0xa11140)
 
-  ip_address = wlan.ifconfig()[0]
-  logging.info("  - ip address: ", ip_address)
+  # Print MAC
+  mac = ubinascii.hexlify(wlan.config('mac'),':').decode()
+  logging.info("> MAC: " + mac)
+  
+  # Disconnect when necessary
+  status = dump_status()
+  if status >= CYW43_LINK_JOIN and status < CYW43_LINK_UP:
+    logging.info("> Disconnecting...")
+    wlan.disconnect()
+    try:
+      wait_status(CYW43_LINK_DOWN)
+    except Exception as x:
+      raise Exception(f"Failed to disconnect: {x}")
+  logging.info("> Ready for connection!")
 
-  return True
+  # Connect to our AP
+  logging.info(f"> Connecting to SSID {ssid} (password: {password})...")
+  wlan.connect(ssid, password)
+  try:
+    wait_status(CYW43_LINK_UP)
+  except Exception as x:
+    raise Exception(f"Failed to connect to SSID {ssid} (password: {password}): {x}")
+  logging.info("> Connected successfully!")
+
+  ip, subnet, gateway, dns = wlan.ifconfig()
+  logging.info(f"> IP: {ip}, Subnet: {subnet}, Gateway: {gateway}, DNS: {dns}")
+  
+  elapsed_ms = time.ticks_ms() - start_ms
+  logging.info(f"> Elapsed: {elapsed_ms}ms")
+  return elapsed_ms
+
+def connect_to_wifi():
+  try:
+    logging.info(f"> connecting to wifi network '{config.wifi_ssid}'")
+    elapsed_ms = reconnect_wifi(config.wifi_ssid, config.wifi_password, config.wifi_country)
+    # a slow connection time will drain the battery faster and may
+    # indicate a poor quality connection
+    seconds_to_connect = elapsed_ms / 1000
+    if seconds_to_connect > 5:
+      logging.warn("  - took", seconds_to_connect, "seconds to connect to wifi")
+    return True
+  except Exception as x:
+    logging.error(f"! {x}")
+    return False
 
 # log the error, blink the warning led, and go back to sleep
 def halt(message):
@@ -219,9 +278,38 @@ def low_disk_space():
     return (os.statvfs(".")[3] / os.statvfs(".")[2]) < 0.1   
   return False
 
-# returns True if the rtc clock has been set
+# returns True if the rtc clock has been set recently 
 def is_clock_set():
-  return rtc.datetime()[0] > 2020 # year greater than 2020? we're golden!
+  # is the year on or before 2020?
+  if rtc.datetime()[0] <= 2020:
+    return False
+
+  if helpers.file_exists("sync_time.txt"):
+    now_str = helpers.datetime_string()
+    now = helpers.timestamp(now_str)
+
+    time_entries = []
+    with open("sync_time.txt", "r") as timefile:
+      time_entries = timefile.read().split("\n")
+
+    # read the first line from the time file
+    sync = now
+    for entry in time_entries:
+      if entry:
+        sync = helpers.timestamp(entry)
+        break
+
+    seconds_since_sync = now - sync
+    if seconds_since_sync >= 0:  # there's the rare chance of having a newer sync time than what the RTC reports
+      try:
+        if seconds_since_sync < (config.resync_frequency * 60 * 60):
+          return True
+
+        logging.info(f"  - rtc has not been synched for {config.resync_frequency} hour(s)")
+      except AttributeError:
+        return True
+
+  return False
 
 # connect to wifi and attempt to fetch the current time from an ntp server
 def sync_clock_from_ntp():
@@ -233,8 +321,27 @@ def sync_clock_from_ntp():
   if not timestamp:
     logging.error("  - failed to fetch time from ntp server")
     return False  
+
+  # fixes an issue where sometimes the RTC would not pick up the new time
+  i2c.writeto_mem(0x51, 0x00, b'\x10') # reset the rtc so we can change the time
   rtc.datetime(timestamp) # set the time on the rtc chip
+  i2c.writeto_mem(0x51, 0x00, b'\x00') # ensure rtc is running
+  rtc.enable_timer_interrupt(False)
+
+  # read back the RTC time to confirm it was updated successfully
+  dt = rtc.datetime()
+  if dt != timestamp[0:7]:
+    logging.error("  - failed to update rtc")
+    if helpers.file_exists("sync_time.txt"):
+      os.remove("sync_time.txt")
+    return False
+
   logging.info("  - rtc synched")
+  
+  # write out the sync time log
+  with open("sync_time.txt", "w") as syncfile:
+    syncfile.write("{0:04d}-{1:02d}-{2:02d}T{3:02d}:{4:02d}:{5:02d}Z".format(*timestamp))  
+
   return True
 
 # set the state of the warning led (off, on, blinking)
@@ -301,8 +408,8 @@ def get_sensor_readings():
     logging.info(f"  - seconds since last reading: {seconds_since_last}")
 
 
-  readings = get_board().get_sensor_readings(seconds_since_last)
-  readings["voltage"] = 0.0 # battery_voltage #Temporarily removed until issue is fixed
+  readings = get_board().get_sensor_readings(seconds_since_last, vbus_present)
+  # readings["voltage"] = 0.0 # battery_voltage #Temporarily removed until issue is fixed
 
   # write out the last time log
   with open("last_time.txt", "w") as timefile:
@@ -353,7 +460,10 @@ def cache_upload(readings):
 
 # return the number of cached results waiting to be uploaded
 def cached_upload_count():
-  return len(os.listdir("uploads"))
+  try:
+    return len(os.listdir("uploads"))
+  except OSError:
+    return 0
 
 # returns True if we have more cached uploads than our config allows
 def is_upload_needed():
@@ -383,8 +493,23 @@ def upload_readings():
             with open("reattempt_upload.txt", "w") as attemptfile:
               attemptfile.write("")
 
-            logging.info(f"  - rate limited, going to sleep for 1 minute")
+            logging.info(f"  - cannot upload '{cache_file[0]}' - rate limited")
             sleep(1)
+          elif status == UPLOAD_LOST_SYNC:
+            # remove the sync time file to trigger a resync on next boot
+            if helpers.file_exists("sync_time.txt"):
+              os.remove("sync_time.txt")
+             
+            # write out that we want to attempt a reupload
+            with open("reattempt_upload.txt", "w") as attemptfile:
+              attemptfile.write("")
+
+            logging.info(f"  - cannot upload '{cache_file[0]}' - rtc has become out of sync")
+            sleep(1)
+          elif status == UPLOAD_SKIP_FILE:
+            logging.error(f"  ! cannot upload '{cache_file[0]}' to {destination}. Skipping file")
+            warn_led(WARN_LED_BLINK)
+            continue
           else:
             logging.error(f"  ! failed to upload '{cache_file[0]}' to {destination}")
             return False
@@ -399,6 +524,15 @@ def upload_readings():
   except ImportError:
     logging.error(f"! cannot find destination {destination}")
     return False
+
+  finally:
+    # Disconnect wifi
+    import network
+    logging.info("> Disconnecting wireless after upload")
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    wlan.disconnect()
+    wlan.active(False)
 
   return True
 
@@ -432,11 +566,16 @@ def startup():
 
   # see if we were woken to attempt a reupload
   if helpers.file_exists("reattempt_upload.txt"):
-    os.remove("reattempt_upload.txt")
+    upload_count = cached_upload_count()
+    if upload_count == 0:
+      os.remove("reattempt_upload.txt")
+      return
 
-    logging.info(f"> {cached_upload_count()} cache file(s) still to upload")
+    logging.info(f"> {upload_count} cache file(s) still to upload")
     if not upload_readings():
       halt("! reading upload failed")
+
+    os.remove("reattempt_upload.txt")
 
     # if it was the RTC that woke us, go to sleep until our next scheduled reading
     # otherwise continue with taking new readings etc
@@ -445,7 +584,10 @@ def startup():
       sleep()
 
 def sleep(time_override=None):
-  logging.info("> going to sleep")
+  if time_override is not None:
+    logging.info(f"> going to sleep for {time_override} minute(s)")
+  else:
+    logging.info("> going to sleep")
 
   # make sure the rtc flags are cleared before going back to sleep
   logging.debug("  - clearing and disabling previous alarm")
@@ -454,12 +596,16 @@ def sleep(time_override=None):
 
   # set alarm to wake us up for next reading
   dt = rtc.datetime()
-  hour, minute = dt[3:5]
+  hour, minute, second = dt[3:6]
 
   # calculate how many minutes into the day we are
   if time_override is not None:
     minute += time_override
   else:
+    # if the time is very close to the end of the minute, advance to the next minute
+    # this aims to fix the edge case where the board goes to sleep right as the RTC triggers, thus never waking up
+    if second > 55:
+      minute += 1
     minute = math.floor(minute / config.reading_frequency) * config.reading_frequency
     minute += config.reading_frequency
 
