@@ -582,7 +582,7 @@ def arm_watchdog():
     hour -= 24
   ampm = "am" if hour < 12 else "pm"
 
-  logging.info(f"  - setting default alarm to wake at {hour:02}:{minute:02}{ampm}")
+  logging.info(f"  - setting watchdog to wake at {hour:02}:{minute:02}{ampm}")
 
   # sleep until next scheduled reading
   rtc.set_alarm(0, minute, hour)
