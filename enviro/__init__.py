@@ -207,9 +207,13 @@ def reconnect_wifi(ssid, password, country, hostname=None):
     return False
 
   wlan.active(True)
-  # Disable power saving mode if on USB power
-  if vbus_present:
-    wlan.config(pm=0xa11140)
+  # Disable power saving mode
+  wlan.config(pm=wlan.PM_PERFORMANCE)
+  available_networks = [k[0].decode() for k in wlan.scan()]
+  # If the desired network isn't found, don't bother continuing
+  logging.info("> Available networks: " + ", ".join(available_networks))
+  if not ssid in available_networks:
+    raise Exception(f"Network SSID {ssid} not found, skipping!")
 
   # Print MAC
   mac = ubinascii.hexlify(wlan.config('mac'),':').decode()
