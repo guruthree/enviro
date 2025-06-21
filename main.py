@@ -30,11 +30,12 @@ sleep(0.5)
 # import enviro firmware, this will trigger provisioning if needed
 import enviro
 import os
+from enviro.constants import WAKE_REASON_BUTTON_PRESS
 
 
 try:
   # initialise enviro
-  enviro.startup()
+  reason = enviro.startup()
 
   # if the clock isn't set...
   if not enviro.is_clock_set():
@@ -84,7 +85,7 @@ try:
     enviro.cache_upload(reading)
 
     # if we have enough cached uploads...
-    if enviro.is_upload_needed():
+    if enviro.is_upload_needed() or reason == WAKE_REASON_BUTTON_PRESS:
       enviro.logging.info(f"> {enviro.cached_upload_count()} cache file(s) need uploading")
       if not enviro.upload_readings():
         enviro.halt("! reading upload failed")
