@@ -157,13 +157,12 @@ def reconnect_wifi(ssid, password, country, hostname=None):
   import time
   import network
   import math
-  import rp2
   import ubinascii
   
   start_ms = time.ticks_ms()
 
   # Set country
-  rp2.country(country)
+  network.country(country)
 
   # Set hostname
   if hostname is None:
